@@ -93,6 +93,9 @@ jobs:
       - name: Convert repository name to lowercase
         run: echo "REPO_LOWER=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
+      - name: Clean up old staging container
+        run: docker stop staging-app 2>/dev/null || true
+
       - name: Deploy to staging
         run: |
           docker run -d --name staging-app -p 8080:8080 ghcr.io/${{ env.REPO_LOWER }}:latest
@@ -121,13 +124,21 @@ jobs:
 
   deploy-production:
     if: github.event_name == 'workflow_dispatch'
+    needs: docker-build-push
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
       - name: Convert repository name to lowercase
         run: echo "REPO_LOWER=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Clean up old containers (blue & green)
+        run: |
+          docker stop app-blue app-green 2>/dev/null || true
+          docker rm app-blue app-green 2>/dev/null || true
 
       - name: Blue-green deploy to production
         run: |
@@ -135,15 +146,17 @@ jobs:
           if [ -z "$VERSION" ]; then VERSION="latest"; fi
           IMAGE=ghcr.io/${{ env.REPO_LOWER }}:$VERSION
 
+          echo "Using image: $IMAGE"
+
           docker run -d --name app-green -p 8081:8080 $IMAGE
-          sleep 5
-          curl --retry 5 --retry-delay 2 --fail http://localhost:8081/health || exit 1
+          sleep 10   # Даём приложению время стартовать
+          curl --retry 10 --retry-delay 2 --fail http://localhost:8081/health || exit 1
 
           docker stop app-blue 2>/dev/null || true
 
           docker run -d --name app-blue -p 8080:8080 $IMAGE
-          sleep 3
-          curl --fail http://localhost:8080/health || exit 1
+          sleep 5
+          curl --retry 5 --retry-delay 2 --fail http://localhost:8080/health || exit 1
 
           docker stop app-green && docker rm app-green
 
